@@ -1,0 +1,847 @@
+-- ================================================================
+--  TR GOJO | Blox Fruits Mastery Hub
+--  Sadece Sea 2 (Forgotten Island) & Sea 3 (Castle on the Sea)
+--  90% Melee softener → 10% Gun finish → Mastery: GUN
+-- ================================================================
+
+local Players        = game:GetService("Players")
+local RunService     = game:GetService("RunService")
+local TweenService   = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local PathfindingService = game:GetService("PathfindingService")
+
+local LP     = Players.LocalPlayer
+local Mouse  = LP:GetMouse()
+
+-- ================================================================
+-- YARDIMCI FONKSİYONLAR
+-- ================================================================
+
+local function getCharacter()
+    return LP.Character
+end
+
+local function getHRP()
+    local c = getCharacter()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHumanoid()
+    local c = getCharacter()
+    return c and c:FindFirstChildWhichIsA("Humanoid")
+end
+
+-- Karakter yüzünü NPC'ye çevir
+local function faceTarget(targetHRP)
+    local hrp = getHRP()
+    if hrp and targetHRP then
+        local dir = (targetHRP.Position - hrp.Position) * Vector3.new(1, 0, 1)
+        hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + dir)
+    end
+end
+
+-- Aracı backpack/characterdan bul ve kuşan
+local function equipTool(keyword)
+    local char = getCharacter()
+    if not char then return nil end
+    -- Zaten ellinde mi?
+    for _, t in pairs(char:GetChildren()) do
+        if t:IsA("Tool") and t.Name:lower():find(keyword:lower()) then
+            return t
+        end
+    end
+    -- Backpack'te ara
+    for _, t in pairs(LP.Backpack:GetChildren()) do
+        if t:IsA("Tool") and t.Name:lower():find(keyword:lower()) then
+            char:WaitForChild("Humanoid"):EquipTool(t)
+            task.wait(0.3)
+            return t
+        end
+    end
+    return nil
+end
+
+-- Seçilen fighting style'ı bul (melee = adına göre)
+-- Blox Fruits'te fighting styles Tool olarak gözükür (Superhuman, Death Step vs.)
+local MELEE_KEYWORDS = {
+    "superhuman","death step","electric","sharkman","fishman",
+    "dark step","water kung fu","ice kung fu","dragon","godhuman","sanguine art",
+    "fighting style","melee","combat","black leg","electric claw"
+}
+local GUN_KEYWORDS = {
+    "musket","rifle","cannon","bazooka","gun","slingshot","gatling",
+    "dark_dagger","acidum rifle","soul guitar","pistol"
+}
+
+local function equipMelee(forceName)
+    if forceName then
+        return equipTool(forceName)
+    end
+    for _, kw in ipairs(MELEE_KEYWORDS) do
+        local t = equipTool(kw)
+        if t then return t end
+    end
+    return nil
+end
+
+local function equipGun(forceName)
+    if forceName then
+        return equipTool(forceName)
+    end
+    for _, kw in ipairs(GUN_KEYWORDS) do
+        local t = equipTool(kw)
+        if t then return t end
+    end
+    return nil
+end
+
+-- M1 simüle et (VIM + mouse click fallback)
+local function doM1()
+    local hrp = getHRP()
+    if not hrp then return end
+    -- Mouse konumunu NPC'ye yönlendir (zaten faceTarget sonrası)
+    local ok, err = pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(
+            Mouse.X, Mouse.Y, 0, true, game, 0)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(
+            Mouse.X, Mouse.Y, 0, false, game, 0)
+    end)
+    if not ok then
+        -- Fallback: UserInputService sim
+        pcall(function()
+            local ev = Instance.new("InputObject")
+            ev.KeyCode = Enum.KeyCode.Unknown
+            ev.UserInputType = Enum.UserInputType.MouseButton1
+            ev.UserInputState = Enum.UserInputState.Begin
+        end)
+    end
+end
+
+-- ================================================================
+-- DENİZ TESPİTİ (Sea 2 / Sea 3)
+-- ================================================================
+-- Sea 2 Forgotten Island : Mythological Pirate, Sea Soldier, Water Fighter (Lv 1700-1850)
+-- Sea 3 Castle on the Sea: Demonic Soul (Lv 2325), Possessed Mummy (Lv 2375)
+
+local SEA2_NPCS = {"Mythological", "Sea Soldier", "Water Fighter", "Tide"}
+local SEA3_NPCS = {"Demonic Soul", "Demonic", "Possessed Mummy", "Possessed", "Mummy"}
+
+local function detectSea()
+    local hrp = getHRP()
+    if not hrp then return nil end
+
+    local searchRadius = 800
+
+    for _, desc in pairs(workspace:GetDescendants()) do
+        if desc:IsA("Humanoid") and desc.Health > 0 then
+            local enemyModel = desc.Parent
+            if enemyModel and enemyModel ~= getCharacter() then
+                local eHRP = enemyModel:FindFirstChild("HumanoidRootPart")
+                if eHRP then
+                    local dist = (hrp.Position - eHRP.Position).Magnitude
+                    if dist < searchRadius then
+                        local name = enemyModel.Name
+                        for _, kw in ipairs(SEA3_NPCS) do
+                            if name:lower():find(kw:lower()) then
+                                return 3, name
+                            end
+                        end
+                        for _, kw in ipairs(SEA2_NPCS) do
+                            if name:lower():find(kw:lower()) then
+                                return 2, name
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- ================================================================
+-- EN YAKIN DÜŞMAN NPC'Yİ BUL
+-- ================================================================
+
+local function findNearestEnemy()
+    local hrp = getHRP()
+    if not hrp then return nil end
+
+    local closest = nil
+    local closestDist = math.huge
+    local searchRadius = 200
+
+    local sea, _ = detectSea()
+
+    local targetKeywords = {}
+    if sea == 2 then
+        targetKeywords = SEA2_NPCS
+    elseif sea == 3 then
+        targetKeywords = SEA3_NPCS
+    else
+        -- İki denizin keyword'lerini birleştir
+        for _, v in ipairs(SEA2_NPCS) do table.insert(targetKeywords, v) end
+        for _, v in ipairs(SEA3_NPCS) do table.insert(targetKeywords, v) end
+    end
+
+    for _, desc in pairs(workspace:GetDescendants()) do
+        if desc:IsA("Humanoid") and desc.Health > 0 and desc.Parent ~= getCharacter() then
+            local enemyModel = desc.Parent
+            local eHRP = enemyModel and enemyModel:FindFirstChild("HumanoidRootPart")
+            if eHRP then
+                local dist = (hrp.Position - eHRP.Position).Magnitude
+                if dist < closestDist and dist < searchRadius then
+                    local name = enemyModel.Name
+                    for _, kw in ipairs(targetKeywords) do
+                        if name:lower():find(kw:lower()) then
+                            closest     = {model = enemyModel, humanoid = desc, hrp = eHRP}
+                            closestDist = dist
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closest
+end
+
+-- ================================================================
+-- NPC'YE GİT (basit teleport + pathfind fallback)
+-- ================================================================
+
+local function moveToNPC(targetHRP, maxWait)
+    local hum = getHumanoid()
+    local hrp = getHRP()
+    if not hum or not hrp or not targetHRP then return end
+
+    maxWait = maxWait or 5
+    hum:MoveTo(targetHRP.Position + Vector3.new(0, 0, 4))
+
+    local t = 0
+    while t < maxWait do
+        if (hrp.Position - targetHRP.Position).Magnitude < 8 then break end
+        task.wait(0.1)
+        t = t + 0.1
+    end
+
+    -- Hâlâ uzaksa kısa teleport
+    if (hrp.Position - targetHRP.Position).Magnitude > 15 then
+        hrp.CFrame = CFrame.new(targetHRP.Position + Vector3.new(0, 0, 5))
+    end
+end
+
+-- ================================================================
+-- ANA DESTEK DÖNGÜSÜ
+-- ================================================================
+
+local masteryRunning = false
+local selectedMeleeStyle = nil  -- kullanıcının seçtiği fighting style (string)
+local selectedGunName   = nil   -- kullanıcının seçtiği gun (string)
+
+local function masteryLoop()
+    while masteryRunning do
+        -- Denizi kontrol et
+        local sea, seaNPC = detectSea()
+        if not sea then
+            task.wait(2)
+            continue
+        end
+
+        -- Hedef NPC bul
+        local enemy = findNearestEnemy()
+        if not enemy or not enemy.humanoid or enemy.humanoid.Health <= 0 then
+            task.wait(1)
+            continue
+        end
+
+        local npcHumanoid = enemy.humanoid
+        local npcHRP      = enemy.hrp
+        local npcMaxHP    = npcHumanoid.MaxHealth
+
+        -- NPC'ye yürü / yaklaş
+        moveToNPC(npcHRP, 4)
+        if not masteryRunning then break end
+
+        -- ---- FAZA 1: MELEE ile %90 HP eritme ----
+        local meleeEquipped = equipMelee(selectedMeleeStyle)
+        if not meleeEquipped then
+            warn("[TRGojo] Melee/Fighting Style bulunamadı! Backpack'ini kontrol et.")
+            task.wait(2)
+            continue
+        end
+
+        local switchThreshold = npcMaxHP * 0.10  -- %10 HP kala gun'a geç
+
+        while masteryRunning
+            and npcHumanoid
+            and npcHumanoid.Health > switchThreshold do
+
+            -- NPC hâlâ hayatta mı?
+            if npcHumanoid.Health <= 0 then break end
+
+            faceTarget(npcHRP)
+            moveToNPC(npcHRP, 0.3)
+            doM1()
+            task.wait(0.18)  -- BF M1 cooldown yaklaşık
+        end
+
+        if not masteryRunning then break end
+        if npcHumanoid.Health <= 0 then
+            task.wait(0.5)
+            continue  -- NPC öldü, yenisini bul
+        end
+
+        -- ---- FAZA 2: GUN ile son %10 — MASTERİ BURAYA GELİR ----
+        local gunEquipped = equipGun(selectedGunName)
+        if not gunEquipped then
+            warn("[TRGojo] Gun bulunamadı! Silahını character'a al.")
+            task.wait(2)
+            continue
+        end
+
+        while masteryRunning
+            and npcHumanoid
+            and npcHumanoid.Health > 0 do
+
+            faceTarget(npcHRP)
+            moveToNPC(npcHRP, 0.3)
+            doM1()
+            task.wait(0.22)  -- Gun M1 biraz daha yavaş
+        end
+
+        task.wait(0.4)  -- kısa nefes, spawn bekle
+    end
+end
+
+-- ================================================================
+-- GUI OLUŞTURMA
+-- ================================================================
+
+local function makeTween(obj, goal, t)
+    return TweenService:Create(obj,
+        TweenInfo.new(t or 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        goal)
+end
+
+-- ScreenGui
+local SG = Instance.new("ScreenGui")
+SG.Name = "TRGOJOHub"
+SG.ResetOnSpawn = false
+SG.IgnoreGuiInset = true
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.Parent = LP:WaitForChild("PlayerGui")
+
+-- Ana çerçeve
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 600, 0, 440)
+Main.Position = UDim2.new(0.5, -300, 0.5, -220)
+Main.BackgroundColor3 = Color3.fromRGB(8, 0, 0)
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Parent = SG
+
+-- Köşe yumuşatma
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 6)
+mainCorner.Parent = Main
+
+-- Sürükle (drag)
+do
+    local dragging, dragInput, dragStart, startPos
+    Main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = Main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    Main.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            Main.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- ---- HEADER ----
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 44)
+Header.Position = UDim2.new(0, 0, 0, 0)
+Header.BackgroundColor3 = Color3.fromRGB(180, 20, 20)
+Header.BorderSizePixel = 0
+Header.ZIndex = 2
+Header.Parent = Main
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 6)
+headerCorner.Parent = Header
+
+-- Header alt kısmı keskinleştir
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0.5, 0)
+headerFix.Position = UDim2.new(0, 0, 0.5, 0)
+headerFix.BackgroundColor3 = Color3.fromRGB(180, 20, 20)
+headerFix.BorderSizePixel = 0
+headerFix.ZIndex = 2
+headerFix.Parent = Header
+
+-- Logo görseli
+local LogoImg = Instance.new("ImageLabel")
+LogoImg.Name = "Logo"
+LogoImg.Size = UDim2.new(0, 34, 0, 34)
+LogoImg.Position = UDim2.new(0, 6, 0.5, -17)
+LogoImg.BackgroundTransparency = 1
+-- !! Kendi TR GOJO asset ID'ini buraya yaz !!
+-- rbxassetid://SENIN_ASSET_ID_BURAYA
+LogoImg.Image = "rbxassetid://7072706620"  -- placeholder Gojo görseli
+LogoImg.ZIndex = 3
+LogoImg.Parent = Header
+
+local logoCorner = Instance.new("UICorner")
+logoCorner.CornerRadius = UDim.new(1, 0)
+logoCorner.Parent = LogoImg
+
+-- Header başlık
+local HeaderTitle = Instance.new("TextLabel")
+HeaderTitle.Name = "Title"
+HeaderTitle.Size = UDim2.new(0, 200, 1, 0)
+HeaderTitle.Position = UDim2.new(0, 46, 0, 0)
+HeaderTitle.BackgroundTransparency = 1
+HeaderTitle.Text = "TR GOJO"
+HeaderTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+HeaderTitle.TextSize = 18
+HeaderTitle.Font = Enum.Font.GothamBold
+HeaderTitle.TextXAlignment = Enum.TextXAlignment.Left
+HeaderTitle.ZIndex = 3
+HeaderTitle.Parent = Header
+
+-- Kapat butonu
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -34, 0.5, -14)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 30, 30)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 14
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.ZIndex = 4
+CloseBtn.Parent = Header
+local cCorner = Instance.new("UICorner")
+cCorner.CornerRadius = UDim.new(0, 4)
+cCorner.Parent = CloseBtn
+CloseBtn.MouseButton1Click:Connect(function()
+    masteryRunning = false
+    SG:Destroy()
+end)
+
+-- ---- SOL SIDEBAR ----
+local Sidebar = Instance.new("Frame")
+Sidebar.Name = "Sidebar"
+Sidebar.Size = UDim2.new(0, 170, 1, -44)
+Sidebar.Position = UDim2.new(0, 0, 0, 44)
+Sidebar.BackgroundColor3 = Color3.fromRGB(18, 2, 2)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+
+local sideLayout = Instance.new("UIListLayout")
+sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
+sideLayout.Padding = UDim.new(0, 2)
+sideLayout.Parent = Sidebar
+
+local sidePad = Instance.new("UIPadding")
+sidePad.PaddingTop = UDim.new(0, 8)
+sidePad.PaddingLeft = UDim.new(0, 6)
+sidePad.PaddingRight = UDim.new(0, 6)
+sidePad.Parent = Sidebar
+
+-- ---- SAĞ PANEL (içerik alanı) ----
+local ContentPanel = Instance.new("Frame")
+ContentPanel.Name = "ContentPanel"
+ContentPanel.Size = UDim2.new(1, -170, 1, -44)
+ContentPanel.Position = UDim2.new(0, 170, 0, 44)
+ContentPanel.BackgroundColor3 = Color3.fromRGB(12, 1, 1)
+ContentPanel.BorderSizePixel = 0
+ContentPanel.ClipsDescendants = true
+ContentPanel.Parent = Main
+
+-- Ayırıcı çizgi
+local Divider = Instance.new("Frame")
+Divider.Size = UDim2.new(0, 1, 1, -44)
+Divider.Position = UDim2.new(0, 170, 0, 44)
+Divider.BackgroundColor3 = Color3.fromRGB(100, 10, 10)
+Divider.BorderSizePixel = 0
+Divider.Parent = Main
+
+-- ================================================================
+-- SIDEBAR BUTON FABRİKASI
+-- ================================================================
+
+local function makeSideBtn(labelText, layoutOrder)
+    local btn = Instance.new("TextButton")
+    btn.Name = "Btn_" .. labelText
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 4, 4)
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = layoutOrder
+    btn.Parent = Sidebar
+
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 5)
+    bc.Parent = btn
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -10, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 13
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = btn
+
+    -- Hover efekti
+    btn.MouseEnter:Connect(function()
+        makeTween(btn, {BackgroundColor3 = Color3.fromRGB(90, 10, 10)}, 0.15):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        makeTween(btn, {BackgroundColor3 = Color3.fromRGB(30, 4, 4)}, 0.15):Play()
+    end)
+
+    return btn, lbl
+end
+
+-- ================================================================
+-- SAĞ PANEL SAYFALARI
+-- ================================================================
+
+local pages = {}
+
+local function showPage(name)
+    for k, p in pairs(pages) do
+        p.Visible = (k == name)
+    end
+end
+
+-- ---- MASTERY SAYFASI ----
+local MasteryPage = Instance.new("Frame")
+MasteryPage.Name = "MasteryPage"
+MasteryPage.Size = UDim2.new(1, 0, 1, 0)
+MasteryPage.BackgroundTransparency = 1
+MasteryPage.Visible = false
+MasteryPage.Parent = ContentPanel
+pages["Mastery"] = MasteryPage
+
+local masteryTitle = Instance.new("TextLabel")
+masteryTitle.Size = UDim2.new(1, -20, 0, 30)
+masteryTitle.Position = UDim2.new(0, 10, 0, 10)
+masteryTitle.BackgroundTransparency = 1
+masteryTitle.Text = "Mastery Türünü Seç"
+masteryTitle.TextColor3 = Color3.fromRGB(255, 80, 80)
+masteryTitle.TextSize = 14
+masteryTitle.Font = Enum.Font.GothamBold
+masteryTitle.TextXAlignment = Enum.TextXAlignment.Left
+masteryTitle.Parent = MasteryPage
+
+-- 4 kategori butonu
+local masteryCategories = {"Melee", "Fruits", "Gun", "Sword"}
+local selectedCategory = nil
+local categoryBtns = {}
+
+local catLayout = Instance.new("Frame")
+catLayout.Size = UDim2.new(1, -20, 0, 180)
+catLayout.Position = UDim2.new(0, 10, 0, 48)
+catLayout.BackgroundTransparency = 1
+catLayout.Parent = MasteryPage
+
+local catGrid = Instance.new("UIGridLayout")
+catGrid.CellSize = UDim2.new(0.5, -4, 0, 60)
+catGrid.CellPadding = UDim2.new(0, 8, 0, 8)
+catGrid.SortOrder = Enum.SortOrder.LayoutOrder
+catGrid.Parent = catLayout
+
+for i, cat in ipairs(masteryCategories) do
+    local catBtn = Instance.new("TextButton")
+    catBtn.Name = "Cat_" .. cat
+    catBtn.BackgroundColor3 = Color3.fromRGB(40, 6, 6)
+    catBtn.Text = cat
+    catBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    catBtn.TextSize = 14
+    catBtn.Font = Enum.Font.GothamBold
+    catBtn.BorderSizePixel = 0
+    catBtn.AutoButtonColor = false
+    catBtn.LayoutOrder = i
+    catBtn.Parent = catLayout
+
+    local cc = Instance.new("UICorner")
+    cc.CornerRadius = UDim.new(0, 6)
+    cc.Parent = catBtn
+
+    categoryBtns[cat] = catBtn
+
+    catBtn.MouseButton1Click:Connect(function()
+        selectedCategory = cat
+        -- Seçili butonu vurgula
+        for _, cb in pairs(categoryBtns) do
+            makeTween(cb, {BackgroundColor3 = Color3.fromRGB(40, 6, 6),
+                           TextColor3 = Color3.fromRGB(200, 200, 200)}, 0.1):Play()
+        end
+        makeTween(catBtn, {BackgroundColor3 = Color3.fromRGB(180, 20, 20),
+                           TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.1):Play()
+    end)
+
+    catBtn.MouseEnter:Connect(function()
+        if selectedCategory ~= cat then
+            makeTween(catBtn, {BackgroundColor3 = Color3.fromRGB(80, 12, 12)}, 0.1):Play()
+        end
+    end)
+    catBtn.MouseLeave:Connect(function()
+        if selectedCategory ~= cat then
+            makeTween(catBtn, {BackgroundColor3 = Color3.fromRGB(40, 6, 6)}, 0.1):Play()
+        end
+    end)
+end
+
+-- ---- DESTEK SAYFASI ----
+local DstPage = Instance.new("Frame")
+DstPage.Name = "DstPage"
+DstPage.Size = UDim2.new(1, 0, 1, 0)
+DstPage.BackgroundTransparency = 1
+DstPage.Visible = false
+DstPage.Parent = ContentPanel
+pages["Destek"] = DstPage
+
+-- Sol görsel (TR GOJO logosu)
+local DstImage = Instance.new("ImageLabel")
+DstImage.Name = "DstImage"
+DstImage.Size = UDim2.new(0, 100, 0, 100)
+DstImage.Position = UDim2.new(0, 14, 0.5, -50)
+DstImage.BackgroundColor3 = Color3.fromRGB(30, 4, 4)
+DstImage.BorderSizePixel = 0
+-- !! Kendi TR GOJO asset ID'ini buraya yaz !!
+DstImage.Image = "rbxassetid://7072706620"  -- placeholder
+DstImage.Parent = DstPage
+
+local dstImgCorner = Instance.new("UICorner")
+dstImgCorner.CornerRadius = UDim.new(0, 8)
+dstImgCorner.Parent = DstImage
+
+-- Sağ açıklama alanı
+local DstInfo = Instance.new("Frame")
+DstInfo.Size = UDim2.new(1, -140, 1, -20)
+DstInfo.Position = UDim2.new(0, 128, 0, 10)
+DstInfo.BackgroundTransparency = 1
+DstInfo.Parent = DstPage
+
+local dstTitleLbl = Instance.new("TextLabel")
+dstTitleLbl.Size = UDim2.new(1, 0, 0, 24)
+dstTitleLbl.Position = UDim2.new(0, 0, 0, 0)
+dstTitleLbl.BackgroundTransparency = 1
+dstTitleLbl.Text = "Destek"
+dstTitleLbl.TextColor3 = Color3.fromRGB(255, 80, 80)
+dstTitleLbl.TextSize = 16
+dstTitleLbl.Font = Enum.Font.GothamBold
+dstTitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+dstTitleLbl.Parent = DstInfo
+
+local dstDescLbl = Instance.new("TextLabel")
+dstDescLbl.Size = UDim2.new(1, 0, 0, 90)
+dstDescLbl.Position = UDim2.new(0, 0, 0, 28)
+dstDescLbl.BackgroundTransparency = 1
+dstDescLbl.Text = "Gun M1 ile masteri yavaş kasılıyorsa Destek devreye girer.\n\n• NPC'nin %90 canını seçilen Melee ile vurur\n• Son %10'unu Gun M1 ile bitirir\n• Masteri tamamen GUN'a gider\n• Sadece Sea 2 (Forgotten Island) ve Sea 3 (Castle on the Sea) çalışır"
+dstDescLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+dstDescLbl.TextSize = 11
+dstDescLbl.Font = Enum.Font.Gotham
+dstDescLbl.TextXAlignment = Enum.TextXAlignment.Left
+dstDescLbl.TextYAlignment = Enum.TextYAlignment.Top
+dstDescLbl.TextWrapped = true
+dstDescLbl.Parent = DstInfo
+
+-- Deniz durumu göstergesi
+local seaStatusLbl = Instance.new("TextLabel")
+seaStatusLbl.Size = UDim2.new(1, -128, 0, 18)
+seaStatusLbl.Position = UDim2.new(0, 128, 1, -58)
+seaStatusLbl.BackgroundTransparency = 1
+seaStatusLbl.Text = "Deniz: Tespit ediliyor..."
+seaStatusLbl.TextColor3 = Color3.fromRGB(150, 150, 150)
+seaStatusLbl.TextSize = 10
+seaStatusLbl.Font = Enum.Font.Gotham
+seaStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+seaStatusLbl.Parent = DstPage
+
+-- Destek toggle butonu
+local DstToggle = Instance.new("TextButton")
+DstToggle.Name = "DstToggle"
+DstToggle.Size = UDim2.new(1, -128, 0, 32)
+DstToggle.Position = UDim2.new(0, 128, 1, -38)
+DstToggle.BackgroundColor3 = Color3.fromRGB(50, 10, 10)
+DstToggle.Text = "▶  Destek Başlat"
+DstToggle.TextColor3 = Color3.fromRGB(220, 220, 220)
+DstToggle.TextSize = 13
+DstToggle.Font = Enum.Font.GothamBold
+DstToggle.BorderSizePixel = 0
+DstToggle.AutoButtonColor = false
+DstToggle.Parent = DstPage
+
+local dtCorner = Instance.new("UICorner")
+dtCorner.CornerRadius = UDim.new(0, 6)
+dtCorner.Parent = DstToggle
+
+DstToggle.MouseButton1Click:Connect(function()
+    -- Kategori seçili mi kontrol et
+    if not selectedCategory then
+        DstToggle.Text = "⚠  Önce Mastery Türü Seç!"
+        task.delay(2, function()
+            DstToggle.Text = masteryRunning and "■  Destek Durdur" or "▶  Destek Başlat"
+        end)
+        return
+    end
+
+    -- Deniz kontrolü
+    local sea, _ = detectSea()
+    if not sea then
+        DstToggle.Text = "⚠  Sea 2/3 değilsin!"
+        task.delay(2.5, function()
+            DstToggle.Text = masteryRunning and "■  Destek Durdur" or "▶  Destek Başlat"
+        end)
+        return
+    end
+
+    masteryRunning = not masteryRunning
+
+    if masteryRunning then
+        DstToggle.Text = "■  Destek Durdur"
+        makeTween(DstToggle, {BackgroundColor3 = Color3.fromRGB(160, 15, 15)}, 0.2):Play()
+        task.spawn(masteryLoop)
+    else
+        DstToggle.Text = "▶  Destek Başlat"
+        makeTween(DstToggle, {BackgroundColor3 = Color3.fromRGB(50, 10, 10)}, 0.2):Play()
+    end
+end)
+
+DstToggle.MouseEnter:Connect(function()
+    if not masteryRunning then
+        makeTween(DstToggle, {BackgroundColor3 = Color3.fromRGB(90, 12, 12)}, 0.1):Play()
+    end
+end)
+DstToggle.MouseLeave:Connect(function()
+    if not masteryRunning then
+        makeTween(DstToggle, {BackgroundColor3 = Color3.fromRGB(50, 10, 10)}, 0.1):Play()
+    end
+end)
+
+-- ================================================================
+-- SIDEBAR BUTONLARI BAĞLA
+-- ================================================================
+
+local masteryBtn, _ = makeSideBtn("Mastery", 1)
+local destekBtn,  _ = makeSideBtn("Destek",  2)
+
+masteryBtn.MouseButton1Click:Connect(function()
+    showPage("Mastery")
+    makeTween(masteryBtn, {BackgroundColor3 = Color3.fromRGB(160, 20, 20)}, 0.1):Play()
+    makeTween(destekBtn,  {BackgroundColor3 = Color3.fromRGB(30, 4, 4)}, 0.1):Play()
+end)
+
+destekBtn.MouseButton1Click:Connect(function()
+    showPage("Destek")
+    makeTween(destekBtn,  {BackgroundColor3 = Color3.fromRGB(160, 20, 20)}, 0.1):Play()
+    makeTween(masteryBtn, {BackgroundColor3 = Color3.fromRGB(30, 4, 4)}, 0.1):Play()
+end)
+
+-- ================================================================
+-- MASTERY SAYFASI — Kategori seçimine göre araç seçimi
+-- ================================================================
+
+-- Kategori seçildiğinde hangi weapon/style aranacak
+-- Kullanıcı seçimine göre State güncelle
+local function onCategorySelect(cat)
+    selectedCategory = cat
+    -- Gun seçildiyse Gun isimli tool ara; diğerleri için uygun keyword
+    if cat == "Gun" then
+        -- Destek modu zaten Gun mastery için → gun equip = gun keyword'lerden biri
+        selectedGunName = nil  -- otomatik tarama
+        selectedMeleeStyle = nil
+    elseif cat == "Sword" then
+        -- Sword kasıyorsa: Sword = gun gibi düşün, melee = softener
+        -- Bu modda "gun" yerine sword kullanılır, mantık aynı
+        selectedGunName = nil  -- sword keyword eklenecek
+        selectedMeleeStyle = nil
+        -- Sword keywordleri GUN_KEYWORDS'e ekle (geçici)
+        table.insert(GUN_KEYWORDS, "sword")
+        table.insert(GUN_KEYWORDS, "katana")
+        table.insert(GUN_KEYWORDS, "pole")
+        table.insert(GUN_KEYWORDS, "dual")
+    elseif cat == "Melee" then
+        -- Melee kasıyorsa: softener = herhangi bir şey, final = melee
+        -- Mantık tersine çevrilir: 90% başka bir şeyle, %10 melee ile
+        selectedMeleeStyle = nil
+        selectedGunName    = nil
+        warn("[TRGojo] Melee mastery modu: softener otomatik seçilir, final = melee")
+    elseif cat == "Fruits" then
+        -- Fruit mastery benzer mantık
+        warn("[TRGojo] Fruit mastery: Fruits equipped iken son vuruş fruit olacak")
+    end
+end
+
+-- Category butonlarına onCategorySelect bağla (mevcut click handler'ın üstüne)
+for cat, cb in pairs(categoryBtns) do
+    cb.MouseButton1Click:Connect(function()
+        onCategorySelect(cat)
+    end)
+end
+
+-- ================================================================
+-- REAL-TIME DENIZ DURUMU GÜNCELLE
+-- ================================================================
+
+task.spawn(function()
+    while task.wait(3) do
+        if not SG.Parent then break end
+        local sea, npcName = detectSea()
+        if sea == 2 then
+            seaStatusLbl.Text = "✔ Sea 2 — Forgotten Island tespit edildi"
+            seaStatusLbl.TextColor3 = Color3.fromRGB(80, 220, 80)
+        elseif sea == 3 then
+            seaStatusLbl.Text = "✔ Sea 3 — Castle on the Sea tespit edildi"
+            seaStatusLbl.TextColor3 = Color3.fromRGB(80, 180, 255)
+        else
+            seaStatusLbl.Text = "✘ Uygun ada bulunamadı (Sea 2/3 git)"
+            seaStatusLbl.TextColor3 = Color3.fromRGB(220, 80, 80)
+        end
+    end
+end)
+
+-- ================================================================
+-- BAŞLANGIÇ
+-- ================================================================
+
+showPage("Mastery")  -- varsayılan sayfa
+makeTween(masteryBtn, {BackgroundColor3 = Color3.fromRGB(160, 20, 20)}, 0.1):Play()
+
+print("[TR GOJO Hub] Yüklendi. Sea 2: Forgotten Island | Sea 3: Castle on the Sea")
+print("[TR GOJO Hub] Gun mastery için: Mastery → Gun seç, ardından Destek → Başlat")
